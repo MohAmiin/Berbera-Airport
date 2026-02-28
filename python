@@ -1,0 +1,375 @@
+#!/usr/bin/env python3
+"""
+Airport Automation System – a simple OOP demo.
+"""
+
+import json
+import uuid
+from datetime import datetime, timedelta
+from typing import Optional, List, Dict
+from dataclasses import dataclass, field, asdict
+
+# ----------------------------------------------------------------------
+# Data classes (plain containers) – used for JSON serialization
+# ----------------------------------------------------------------------
+@dataclass
+class Gate:
+    name: str                # e.g. "A1", "B12"
+    is_occupied: bool = False
+
+    def to_dict(self) -> dict:
+        return {"name": self.name, "is_occupied": self.is_occupied}
+
+    @staticmethod
+    def from_dict(d: dict) -> "Gate":
+        return Gate(d["name"], d["is_occupied"])
+
+
+@dataclass
+class Flight:
+    flight_number: str
+    origin: str
+    destination: str
+    scheduled_departure: str   # ISO‑format string
+    scheduled_arrival: str
+    status: str = "On Time"    # On Time, Delayed, Cancelled
+    gate: Optional[str] = None   # Gate name (None = not assigned)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @staticmethod
+    def from_dict(d: dict) -> "Flight":
+        return Flight(**d)
+
+
+@dataclass
+class Passenger:
+    name: str
+    passport: str
+    booked_flights: List[str] = field(default_factory=list)   # list of flight_numbers
+    checked_in: Dict[str, bool] = field(default_factory=dict) # flight_number → checked_in?
+    seat_assignment: Dict[str, str] = field(default_factory=dict)  # flight_number → seat
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @staticmethod
+    def from_dict(d: dict) -> "Passenger":
+        return Passenger(**d)
+
+
+@dataclass
+class BoardingPass:
+    passenger_name: str
+    passport: str
+    flight_number: str
+    seat: str
+    gate: str
+    boarding_time: str   # ISO‑format string
+    boarding_pass_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @staticmethod
+    def from_dict(d: dict) -> "BoardingPass":
+        return BoardingPass(**d)
+
+
+# ----------------------------------------------------------------------
+# Core Airport logic
+# ----------------------------------------------------------------------
+class Airport:
+    """
+    The central controller that holds flights, gates, passengers
+    and offers operations like scheduling, check‑in, etc.
+    """
+
+    def __init__(self, name: str):
+        self.name = name
+        self.gates: Dict[str, Gate] = {}      # name → Gate
+        self.flights: Dict[str, Flight] = {}   # flight_number → Flight
+        self.passengers: Dict[str, Passenger] = {}  # passport → Passenger
+        self.boarding_passes: List[BoardingPass] = []
+
+    # -------------------------------------------------------------------------
+    # Gate management
+    # -------------------------------------------------------------------------
+    def add_gate(self, name: str) -> None:
+        if name in self.gates:
+            raise ValueError(f"Gate {name} already exists.")
+        self.gates[name] = Gate(name)
+
+    def get_free_gate(self) -> Optional[str]:
+        """Return the name of the first free gate, or None if none available."""
+        for name, gate in self.gates.items():
+            if not gate.is_occupied:
+                return name
+        return None
+
+    def occupy_gate(self, name: str) -> None:
+        if name not in self.gates:
+            raise ValueError(f"Gate {name} does not exist.")
+        self.gates[name].is_occupied = True
+
+    def release_gate(self, name: str) -> None:
+        if name not in self.gates:
+            raise ValueError(f"Gate {name} does not exist.")
+        self.gates[name].is_occupied = False
+
+    # -------------------------------------------------------------------------
+    # Flight operations
+    # -------------------------------------------------------------------------
+    def schedule_flight(self,
+                        flight_number: str,
+                        origin: str,
+                        destination: str,
+                        departure: datetime,
+                        arrival: datetime) -> Flight:
+        if flight_number in self.flights:
+            raise ValueError(f"Flight {flight_number} already exists.")
+        flight = Flight(
+            flight_number=flight_number,
+            origin=origin,
+            destination=destination,
+            scheduled_departure=departure.isoformat(),
+            scheduled_arrival=arrival.isoformat(),
+            status="On Time"
+        )
+        self.flights[flight_number] = flight
+        return flight
+
+    def assign_gate(self, flight_number: str, gate_name: str) -> None:
+        flight = self.flights.get(flight_number)
+        if not flight:
+            raise ValueError(f"Flight {flight_number} not found.")
+        if gate_name not in self.gates:
+            raise ValueError(f"Gate {gate_name} does not exist.")
+        if self.gates[gate_name].is_occupied:
+            raise ValueError(f"Gate {gate_name} is already occupied.")
+        # free previous gate if any
+        if flight.gate:
+            self.release_gate(flight.gate)
+
+        flight.gate = gate_name
+        self.occupy_gate(gate_name)
+
+    def delay_flight(self, flight_number: str, minutes: int) -> None:
+        flight = self.flights.get(flight_number)
+        if not flight:
+            raise ValueError(f"Flight {flight_number} not found.")
+        new_dep = datetime.fromisoformat(flight.scheduled_departure) + timedelta(minutes=minutes)
+        new_arr = datetime.fromisoformat(flight.scheduled_arrival) + timedelta(minutes=minutes)
+        flight.scheduled_departure = new_dep.isoformat()
+        flight.scheduled_arrival = new_arr.isoformat()
+        flight.status = "Delayed"
+
+    def cancel_flight(self, flight_number: str) -> None:
+        flight = self.flights.get(flight_number)
+        if not flight:
+            raise ValueError(f"Flight {flight_number} not found.")
+        flight.status = "Cancelled"
+        if flight.gate:
+            self.release_gate(flight.gate)
+            flight.gate = None
+
+    # -------------------------------------------------------------------------
+    # Passenger operations
+    # -------------------------------------------------------------------------
+    def add_passenger(self, name: str, passport: str) -> Passenger:
+        if passport in self.passengers:
+            raise ValueError(f"Passenger with passport {passport} already exists.")
+        p = Passenger(name=name, passport=passport)
+        self.passengers[passport] = p
+        return p
+
+    def book_flight(self, passport: str, flight_number: str) -> None:
+        p = self.passengers.get(passport)
+        if not p:
+            raise ValueError(f"Passenger {passport} not found.")
+        flight = self.flights.get(flight_number)
+        if not flight:
+            raise ValueError(f"Flight {flight_number} not found.")
+        if flight_number in p.booked_flights:
+            raise ValueError(f"Passenger already booked on {flight_number}.")
+        p.booked_flights.append(flight_number)
+        p.checked_in[flight_number] = False
+        p.seat_assignment[flight_number] = None  # seat not assigned yet
+
+    def check_in_passenger(self,
+                           passport: str,
+                           flight_number: str,
+                           seat: str) -> BoardingPass:
+        p = self.passengers.get(passport)
+        if not p:
+            raise ValueError(f"Passenger {passport} not found.")
+        if flight_number not in p.booked_flights:
+            raise ValueError(f"Passenger not booked on flight {flight_number}.")
+        if p.checked_in.get(flight_number, False):
+            raise ValueError(f"Passenger already checked‑in for {flight_number}.")
+
+        flight = self.flights.get(flight_number)
+        if not flight:
+            raise ValueError(f"Flight {flight_number} not found.")
+        if not flight.gate:
+            raise ValueError("Cannot check‑in: flight has no assigned gate.")
+        if flight.status == "Cancelled":
+            raise ValueError("Cannot check‑in: flight is cancelled.")
+
+        # Update passenger state
+        p.checked_in[flight_number] = True
+        p.seat_assignment[flight_number] = seat
+
+        # Generate boarding pass
+        boarding_time = datetime.fromisoformat(flight.scheduled_departure) - timedelta(minutes=30)
+        bp = BoardingPass(
+            passenger_name=p.name,
+            passport=passport,
+            flight_number=flight_number,
+            seat=seat,
+            gate=flight.gate,
+            boarding_time=boarding_time.isoformat()
+        )
+        self.boarding_passes.append(bp)
+        return bp
+
+    # -------------------------------------------------------------------------
+    # Reporting / Utilities
+    # -------------------------------------------------------------------------
+    def flight_schedule(self,
+                         status: Optional[str] = None,
+                         day: Optional[datetime] = None) -> List[Flight]:
+        """Return flights filtered by optional status and/or day."""
+        out = []
+        for fl in self.flights.values():
+            if status and fl.status != status:
+                continue
+            if day:
+                dep = datetime.fromisoformat(fl.scheduled_departure)
+                if dep.date() != day.date():
+                    continue
+            out.append(fl)
+        return out
+
+    def get_boarding_pass(self, passport: str, flight_number: str) -> Optional[BoardingPass]:
+        for bp in self.boarding_passes:
+            if bp.passport == passport and bp.flight_number == flight_number:
+                return bp
+        return None
+
+    # -------------------------------------------------------------------------
+    # Persistence (JSON)
+    # -------------------------------------------------------------------------
+    def save_to_file(self, path: str) -> None:
+        data = {
+            "name": self.name,
+            "gates": [g.to_dict() for g in self.gates.values()],
+            "flights": [f.to_dict() for f in self.flights.values()],
+            "passengers": [p.to_dict() for p in self.passengers.values()],
+            "boarding_passes": [bp.to_dict() for bp in self.boarding_passes],
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
+    @classmethod
+    def load_from_file(cls, path: str) -> "Airport":
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        airport = cls(data["name"])
+        for g in data["gates"]:
+            airport.gates[g["name"]] = Gate.from_dict(g)
+        for fl in data["flights"]:
+            airport.flights[fl["flight_number"]] = Flight.from_dict(fl)
+        for p in data["passengers"]:
+            airport.passengers[p["passport"]] = Passenger.from_dict(p)
+        for bp in data["boarding_passes"]:
+            airport.boarding_passes.append(BoardingPass.from_dict(bp))
+        return airport
+
+
+# ----------------------------------------------------------------------
+# Demo – shows a tiny workflow
+# ----------------------------------------------------------------------
+def main():
+    # 1️⃣ Create airport
+    jfk = Airport("John F. Kennedy International Airport")
+
+    # 2️⃣ Add gates
+    for g in ("A1", "A2", "B1", "B2"):
+        jfk.add_gate(g)
+
+    # 3️⃣ Schedule some flights
+    now = datetime.now()
+    fl1 = jfk.schedule_flight(
+        "AA100",
+        "JFK",
+        "LAX",
+        departure=now + timedelta(hours=2),
+        arrival=now + timedelta(hours=8)
+    )
+    fl2 = jfk.schedule_flight(
+        "UA202",
+        "JFK",
+        "SFO",
+        departure=now + timedelta(hours=3),
+        arrival=now + timedelta(hours=9, minutes=30)
+    )
+    fl3 = jfk.schedule_flight(
+        "DL350",
+        "JFK",
+        "ORD",
+        departure=now + timedelta(hours=1),
+        arrival=now + timedelta(hours=4)
+    )
+
+    # 4️⃣ Assign gates
+    jfk.assign_gate("AA100", "A1")
+    jfk.assign_gate("UA202", "B1")
+    jfk.assign_gate("DL350", "A2")  # gate A2 now occupied
+
+    # 5️⃣ Register passengers
+    p1 = jfk.add_passenger("Alice Smith", "P1234567")
+    p2 = jfk.add_passenger("Bob Jones", "P7654321")
+    p3 = jfk.add_passenger("Carol White", "P1122334")
+
+    # 6️⃣ Book them on flights
+    jfk.book_flight("P1234567", "AA100")
+    jfk.book_flight("P1234567", "UA202")
+    jfk.book_flight("P7654321", "AA100")
+    jfk.book_flight("P1122334", "DL350")
+
+    # 7️⃣ Check‑in Alice for AA100, get a boarding pass
+    bp_alice_aa = jfk.check_in_passenger("P1234567", "AA100", seat="12A")
+    print("=== Boarding Pass ===")
+    print(f"Passenger: {bp_alice_aa.passenger_name}")
+    print(f"Flight:    {bp_alice_aa.flight_number}")
+    print(f"Seat:      {bp_alice_aa.seat}")
+    print(f"Gate:      {bp_alice_aa.gate}")
+    print(f"Boarding:  {bp_alice_aa.boarding_time}")
+    print()
+
+    # 8️⃣ Show flight schedule (all flights)
+    print("=== Full Flight Schedule ===")
+    for f in jfk.flight_schedule():
+        print(f"{f.flight_number} {f.origin}→{f.destination} | {f.status} | Gate: {f.gate or 'N/A'}")
+    print()
+
+    # 9️⃣ Delay a flight
+    jfk.delay_flight("UA202", minutes=45)
+    print("After delay, UA202 status:", jfk.flights["UA202"].status)
+
+    # 🔟 Save everything to JSON (optional)
+    jfk.save_to_file("jfk_airport.json")
+    print("\nData saved to jfk_airport.json")
+
+    # 1️⃣1️⃣ Reload from JSON and show that it works
+    restored = Airport.load_from_file("jfk_airport.json")
+    print("\n=== Reload test – flight schedule from restored data ===")
+    for f in restored.flight_schedule():
+        print(f"{f.flight_number} {f.origin}→{f.destination} | {f.status} | Gate: {f.gate or 'N/A'}")
+
+
+if __name__ == "__main__":
+    main()
